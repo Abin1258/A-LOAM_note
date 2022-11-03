@@ -62,6 +62,7 @@ const double scanPeriod = 0.1;
 const int systemDelay = 0; 
 int systemInitCount = 0;
 bool systemInited = false;
+//点分类标号:2-代表曲率很大，1-代表曲率比较大,-1-代表曲率很小，0-曲率比较小(其中1包含了2,0包含了1,0和1构成了点云全部的点)
 int N_SCANS = 0;
 float cloudCurvature[400000];
 int cloudSortInd[400000];
@@ -203,7 +204,7 @@ void laserCloudHandler(const sensor_msgs::PointCloud2ConstPtr &laserCloudMsg)
             printf("wrong scan number\n");
             ROS_BREAK();
         }
-        //printf("angle %f scanID %d \n", angle, scanID);
+        printf("angle %f scanID %d \n", angle, scanID);
 
         float ori = -atan2(point.y, point.x);
         if (!halfPassed)

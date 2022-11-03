@@ -105,7 +105,7 @@ std::queue<sensor_msgs::PointCloud2ConstPtr> cornerLessSharpBuf;
 std::queue<sensor_msgs::PointCloud2ConstPtr> surfFlatBuf;
 std::queue<sensor_msgs::PointCloud2ConstPtr> surfLessFlatBuf;
 std::queue<sensor_msgs::PointCloud2ConstPtr> fullPointsBuf;
-std::mutex mBuf;
+std::mutex mBuf;//互斥锁
 
 // undistort lidar point
 void TransformToStart(PointType const *const pi, PointType *const po)
@@ -202,6 +202,7 @@ int main(int argc, char **argv)
 
     ros::Subscriber subLaserCloudFullRes = nh.subscribe<sensor_msgs::PointCloud2>("/velodyne_cloud_2", 100, laserCloudFullResHandler);
 
+    
     ros::Publisher pubLaserCloudCornerLast = nh.advertise<sensor_msgs::PointCloud2>("/laser_cloud_corner_last", 100);
 
     ros::Publisher pubLaserCloudSurfLast = nh.advertise<sensor_msgs::PointCloud2>("/laser_cloud_surf_last", 100);
@@ -215,7 +216,7 @@ int main(int argc, char **argv)
     nav_msgs::Path laserPath;
 
     int frameCount = 0;
-    ros::Rate rate(100);
+    ros::Rate rate(100);//不一定执行
 
     while (ros::ok())
     {
@@ -274,20 +275,22 @@ int main(int argc, char **argv)
                 int cornerPointsSharpNum = cornerPointsSharp->points.size();
                 int surfPointsFlatNum = surfPointsFlat->points.size();
 
-                TicToc t_opt;
+                TicToc t_opt;//2022.03.11，该继续看ceres库用法
+                //基于plicp ppicp求解迭代两次，得到最优rt
                 for (size_t opti_counter = 0; opti_counter < 2; ++opti_counter)
                 {
                     corner_correspondence = 0;
                     plane_correspondence = 0;
 
                     //ceres::LossFunction *loss_function = NULL;
-                    ceres::LossFunction *loss_function = new ceres::HuberLoss(0.1);
+                    // LocalParameterization类的作用是解决非线性优化中的过参数化问题。所谓过参数化，即待优化参数的实际自由度小于参数本身的自由度。例如SLAM中，当采用四元数表示位姿时，由于四元数本身的约束（模长为1），实际的自由度为3而非4。此时，若直接传递四元数进行优化，冗余的维数会带来计算资源的浪费，需要使用Ceres预先定义的QuaternionParameterization对优化参数进行重构：
+                    ceres::LossFunction *loss_function = new ceres::HuberLoss(0.1);//鲁棒核函数
+                   
                     ceres::LocalParameterization *q_parameterization =
-                        new ceres::EigenQuaternionParameterization();
+                        new ceres::EigenQuaternionParameterization();//解决过参数化
                     ceres::Problem::Options problem_options;
-
                     ceres::Problem problem(problem_options);
-                    problem.AddParameterBlock(para_q, 4, q_parameterization);
+                    problem.AddParameterBlock(para_q, 4, q_parameterization);//传入待优化参数和纬度
                     problem.AddParameterBlock(para_t, 3);
 
                     pcl::PointXYZI pointSel;
@@ -295,13 +298,16 @@ int main(int argc, char **argv)
                     std::vector<float> pointSearchSqDis;
 
                     TicToc t_data;
-                    // find correspondence for corner features
+                    // find correspondence for corner features，构建pl残差
                     for (int i = 0; i < cornerPointsSharpNum; ++i)
                     {
-                        TransformToStart(&(cornerPointsSharp->points[i]), &pointSel);
-                        kdtreeCornerLast->nearestKSearch(pointSel, 1, pointSearchInd, pointSearchSqDis);
-
+                        TransformToStart(&(cornerPointsSharp->points[i]), &pointSel);   //利用变换矩阵反推上一帧该点位置
+                       
+                       //k为1最近邻搜索，找到第一个最近点A
+                        kdtreeCornerLast->nearestKSearch(pointSel, 1, pointSearchInd, pointSearchSqDis);//使用KD-tree求解相对上一帧里点云，pointSel和他们的距离，返回一个最近点的点云线数pointSearchInd和距离pointSearchSqDis
+                       //根据第一个点A找到第二个最近点B
                         int closestPointInd = -1, minPointInd2 = -1;
+                        //如果第一个点的距离小于阈值才有效
                         if (pointSearchSqDis[0] < DISTANCE_SQ_THRESHOLD)
                         {
                             closestPointInd = pointSearchInd[0];
@@ -333,7 +339,6 @@ int main(int argc, char **argv)
                                     minPointInd2 = j;
                                 }
                             }
-
                             // search in the direction of decreasing scan line
                             for (int j = closestPointInd - 1; j >= 0; --j)
                             {
@@ -360,7 +365,8 @@ int main(int argc, char **argv)
                                 }
                             }
                         }
-                        if (minPointInd2 >= 0) // both closestPointInd and minPointInd2 is valid
+                        // both closestPointInd and minPointInd2 is valid，就利用三个点构建点到直线的残差
+                        if (minPointInd2 >= 0) 
                         {
                             Eigen::Vector3d curr_point(cornerPointsSharp->points[i].x,
                                                        cornerPointsSharp->points[i].y,
@@ -377,13 +383,14 @@ int main(int argc, char **argv)
                                 s = (cornerPointsSharp->points[i].intensity - int(cornerPointsSharp->points[i].intensity)) / SCAN_PERIOD;
                             else
                                 s = 1.0;
+                            //用到了自定义的hpp文件
                             ceres::CostFunction *cost_function = LidarEdgeFactor::Create(curr_point, last_point_a, last_point_b, s);
-                            problem.AddResidualBlock(cost_function, loss_function, para_q, para_t);
+                            problem.AddResidualBlock(cost_function, loss_function, para_q, para_t);//待优化参数q t
                             corner_correspondence++;
                         }
                     }
 
-                    // find correspondence for plane features
+                    // find correspondence for plane features，构建pp残差
                     for (int i = 0; i < surfPointsFlatNum; ++i)
                     {
                         TransformToStart(&(surfPointsFlat->points[i]), &pointSel);
@@ -489,7 +496,7 @@ int main(int argc, char **argv)
                     {
                         printf("less correspondence! *************************************************\n");
                     }
-
+                    //基于构建的所有残差项求解
                     TicToc t_solver;
                     ceres::Solver::Options options;
                     options.linear_solver_type = ceres::DENSE_QR;
@@ -500,7 +507,7 @@ int main(int argc, char **argv)
                     printf("solver time %f ms \n", t_solver.toc());
                 }
                 printf("optimization twice time %f \n", t_opt.toc());
-
+                //用最新计算出的位姿增量，更新上一帧的位姿，得到当前帧的位姿，注意这里说的位姿都指的是世界坐标系下的位姿
                 t_w_curr = t_w_curr + q_w_curr * t_last_curr;
                 q_w_curr = q_w_curr * q_last_curr;
             }
@@ -550,23 +557,20 @@ int main(int argc, char **argv)
                     TransformToEnd(&laserCloudFullRes->points[i], &laserCloudFullRes->points[i]);
                 }
             }
-
+            //用cornerPointsLessSharp和surfPointsLessFlat 更新 laserCloudCornerLast和laserCloudSurfLast以及相应的kdtree
             pcl::PointCloud<PointType>::Ptr laserCloudTemp = cornerPointsLessSharp;
             cornerPointsLessSharp = laserCloudCornerLast;
             laserCloudCornerLast = laserCloudTemp;
-
             laserCloudTemp = surfPointsLessFlat;
             surfPointsLessFlat = laserCloudSurfLast;
             laserCloudSurfLast = laserCloudTemp;
-
             laserCloudCornerLastNum = laserCloudCornerLast->points.size();
             laserCloudSurfLastNum = laserCloudSurfLast->points.size();
-
             // std::cout << "the size of corner last is " << laserCloudCornerLastNum << ", and the size of surf last is " << laserCloudSurfLastNum << '\n';
-
             kdtreeCornerLast->setInputCloud(laserCloudCornerLast);
             kdtreeSurfLast->setInputCloud(laserCloudSurfLast);
 
+            //publish特征点和点云时有一个publish频率的设置，这是为了控制最后一个节点的执行频率
             if (frameCount % skipFrameNum == 0)
             {
                 frameCount = 0;
@@ -589,8 +593,10 @@ int main(int argc, char **argv)
                 laserCloudFullRes3.header.frame_id = "/camera";
                 pubLaserCloudFullRes.publish(laserCloudFullRes3);
             }
+            
             printf("publication time %f ms \n", t_pub.toc());
             printf("whole laserOdometry time %f ms \n \n", t_whole.toc());
+            
             if(t_whole.toc() > 100)
                 ROS_WARN("odometry process over 100ms");
 

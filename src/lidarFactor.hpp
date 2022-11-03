@@ -8,7 +8,7 @@
 #include <pcl/point_types.h>
 #include <pcl/kdtree/kdtree_flann.h>
 #include <pcl_conversions/pcl_conversions.h>
-
+//计算点到线、点到面的距离残差项
 struct LidarEdgeFactor
 {
 	LidarEdgeFactor(Eigen::Vector3d curr_point_, Eigen::Vector3d last_point_a_,
@@ -47,6 +47,11 @@ struct LidarEdgeFactor
 	{
 		return (new ceres::AutoDiffCostFunction<
 				LidarEdgeFactor, 3, 4, 3>(
+				//                               ^  ^  ^
+				//                               |  |  |
+				//                  残差的维度 ____|  |  |
+				//              优化变量q的维度 _______|  |
+				//              优化变量t的维度 __________|
 			new LidarEdgeFactor(curr_point_, last_point_a_, last_point_b_, s_)));
 	}
 
@@ -102,7 +107,7 @@ struct LidarPlaneFactor
 	Eigen::Vector3d ljm_norm;
 	double s;
 };
-
+// 最后一个struct LidarPlaneNormFactor，是计算Mapping线程中点到平面的残差距离，因为输入了平面方程的参数（），所以直接使用点到面的距离公式进行计算：
 struct LidarPlaneNormFactor
 {
 
